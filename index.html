@@ -191,6 +191,8 @@ button.warn { background:var(--amber); color:#1b1200; border-color:transparent; 
 #examResult { border-color: var(--green); }
 #examResult h2 { margin: 0 0 8px; font-size: 24px; }
 #examResult p { margin: 6px 0; }
+.history-line { display:flex; justify-content:space-between; gap:12px; padding:9px 0; border-top:1px solid var(--line); }
+.history-line span { color: var(--muted); font-size:13px; }
 </style>
 </head>
 <body>
@@ -242,6 +244,15 @@ button.warn { background:var(--amber); color:#1b1200; border-color:transparent; 
     <div class="progress"><div id="bar"></div></div>
   </div>
 
+
+  <div class="card">
+    <strong>Your saved revision progress</strong>
+    <p class="small" id="saveStatus">Your answers will save automatically.</p>
+    <p class="small" id="resumeStatus"></p>
+    <p id="historySummary" class="small">No completed mock tests yet.</p>
+    <div id="historyList"></div>
+    <p class="small">Saved on this browser only — not your GitHub account. Use normal browsing mode and the same device. Clearing website data may remove progress. Mock timers keep running while you're away.</p>
+  </div>
   <div class="card hidden" id="examResult" role="status" aria-live="polite"></div>
 
   <div class="card" id="quizCard">
@@ -274,9 +285,110 @@ let quiz = [];
 let current = 0;
 let selected = {};
 let answeredState = {};
-let wrongBank = JSON.parse(localStorage.getItem('ecsWrongBank') || '{}');
+let wrongBank = safeRead('ecsWrongBank', {});
 
 const el = id => document.getElementById(id);
+const ACTIVE_KEY = 'ecsActiveSessionV1', HISTORY_KEY = 'ecsMockHistoryV1';
+let mockHistory = safeRead(HISTORY_KEY, []);
+if (!Array.isArray(mockHistory)) mockHistory = [];
+let activeMode = null, sessionStartedAt = null, lastFinishReason = '';
+
+function safeRead(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw == null ? fallback : JSON.parse(raw);
+  } catch (_) { return fallback; }
+}
+function safeWrite(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); return true; }
+  catch (_) { return false; }
+}
+function persistSession() {
+  if (!quiz.length) return;
+  const saved = safeWrite(ACTIVE_KEY, {
+    version:1, mode:activeMode || el('mode').value,
+    topic:el('topic').value, count:Number(el('count').value), shuffled:el('shuffleAnswers').checked,
+    items:quiz.map(q=>({id:q.id,order:q.displayOptions.map(o=>o.letter)})),
+    current,selected,answeredState,mockMode,mockFinished,mockDeadline,sessionStartedAt,lastFinishReason
+  });
+  el('saveStatus').textContent = saved
+    ? 'Saved automatically in this browser.'
+    : 'Browser storage is unavailable. Your answers may be lost when you leave.';
+  el('resumeStatus').textContent = mockFinished ? 'Your last mock is complete — answers are available for review.'
+    : quiz.filter(q=>answeredState[q.id]).length + ' of ' + quiz.length
+      + ' answers saved. Return here to continue.' + (mockMode ? ' The timer keeps running.' : '');
+}
+function showHistory() {
+  const valid = mockHistory.filter(h=>h && Number.isInteger(h.score) && h.score >= 0 && h.score <= 50);
+  if (!valid.length) {
+    el('historySummary').textContent='Finish a 50-question mock to begin tracking results.';
+    el('historyList').innerHTML='';
+    return;
+  }
+  const best = Math.max(...valid.map(h=>h.score));
+  el('historySummary').textContent=valid.length+' mock(s) completed · Latest: '
+    +valid[0].score+'/50 · Best: '+best+'/50 · Pass mark: 43/50';
+  el('historyList').innerHTML=valid.slice(0,8).map(h=>{
+    const date=Number.isFinite(h.finishedAt)
+      ? new Date(h.finishedAt).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})
+      : 'Saved mock';
+    return '<div class="history-line"><span>'+escapeHtml(date)+'</span><strong>'
+      +h.score+'/50 — '+(h.score>=43?'PASS':'NOT YET')+'</strong></div>';
+  }).join('');
+}
+function restoreSession() {
+  const saved = safeRead(ACTIVE_KEY,null);
+  if (!saved || saved.version!==1 || !Array.isArray(saved.items) || !saved.items.length
+      || saved.items.length>QUESTIONS.length || !saved.selected || !saved.answeredState
+      || !['mock','topic','wrong','all'].includes(saved.mode)) return false;
+  const byId=new Map(QUESTIONS.map(q=>[q.id,q])), seen=new Set(), restored=[];
+  for (const item of saved.items) {
+    if (!item || !byId.has(item.id) || seen.has(item.id)
+        || !Array.isArray(item.order) || item.order.length!==4
+        || new Set(item.order).size!==4
+        || item.order.some(c=>!['A','B','C','D'].includes(c))) return false;
+    const q=byId.get(item.id); seen.add(item.id);
+    restored.push({...q,displayOptions:item.order.map(letter=>({letter,text:q.options[letter]}))});
+  }
+  if (saved.mockMode && (saved.mode!=='mock' || restored.length!==50
+      || (!saved.mockFinished && !Number.isFinite(saved.mockDeadline)))) return false;
+  quiz=restored;
+  activeMode=saved.mode;
+  current=Number.isInteger(saved.current)?Math.max(0,Math.min(saved.current,quiz.length-1)):0;
+  selected={}; answeredState={};
+  for (const q of quiz) {
+    const choice=saved.selected[q.id];
+    if (choice===null || ['A','B','C','D'].includes(choice)) selected[q.id]=choice;
+    if (saved.answeredState[q.id]===true) answeredState[q.id]=true;
+  }
+  mockMode=saved.mockMode===true;
+  mockFinished=saved.mockFinished===true;
+  mockDeadline=mockMode && !mockFinished ? saved.mockDeadline : null;
+  sessionStartedAt=saved.sessionStartedAt || Date.now();
+  lastFinishReason=typeof saved.lastFinishReason==='string'?saved.lastFinishReason:'';
+  el('mode').value=activeMode;
+  if (typeof saved.topic==='string') el('topic').value=saved.topic;
+  el('count').value=Number.isFinite(saved.count)&&saved.count>0?saved.count:50;
+  el('shuffleAnswers').checked=saved.shuffled!==false;
+  el('mode').dispatchEvent(new Event('change'));
+  el('examTimer').classList.toggle('hidden',!mockMode);
+  if (mockFinished && mockMode) {
+    const score=quiz.filter(q=>selected[q.id]===q.answer).length;
+    const unanswered=quiz.filter(q=>!selected[q.id]).length;
+    el('examResult').classList.remove('hidden');
+    el('examResult').innerHTML='<h2>'+(score>=43?'PASS — well done!':'Not a pass yet')
+      +'</h2><p>'+score+'/50 correct · '+unanswered+' unanswered</p><p>'
+      +escapeHtml(lastFinishReason || 'Mock completed.')+' Review answers using Back and Next.</p>';
+    el('examTimer').textContent='Mock completed';
+  }
+  render();
+  if (mockMode && !mockFinished) {
+    updateMockClock();
+    if (!mockFinished) mockTimerId=setInterval(updateMockClock,1000);
+  }
+  return true;
+}
+
 
 function shuffle(arr) {
   const a = [...arr];
@@ -444,6 +556,7 @@ function render() {
     fb.textContent = '';
   }
   updateStats();
+  persistSession();
 }
 
 function escapeHtml(s) {
@@ -459,7 +572,7 @@ function chooseAnswer(id, letter) {
   if (!mockMode) {
     if (letter === quiz[current].answer) delete wrongBank[id];
     else wrongBank[id] = true;
-    localStorage.setItem('ecsWrongBank', JSON.stringify(wrongBank));
+    safeWrite('ecsWrongBank',wrongBank);
   }
   render();
 }
@@ -471,7 +584,7 @@ function showAnswer() {
     selected[q.id] = null;
     answeredState[q.id] = true;
     wrongBank[q.id] = true;
-    localStorage.setItem('ecsWrongBank', JSON.stringify(wrongBank));
+    safeWrite('ecsWrongBank',wrongBank);
   }
   render();
 }
@@ -487,7 +600,7 @@ function finishMock(reason = 'Mock test completed.') {
     if (selected[q.id] === q.answer) delete wrongBank[q.id];
     else wrongBank[q.id] = true;
   }
-  localStorage.setItem('ecsWrongBank', JSON.stringify(wrongBank));
+  safeWrite('ecsWrongBank',wrongBank);
   const passed = correct >= 43;
   const result = el('examResult');
   result.classList.remove('hidden');
@@ -519,6 +632,34 @@ function updateStats() {
   el('bar').style.width = quiz.length ? (answeredIds.length / quiz.length * 100) + '%' : '0%';
 }
 
+// Wrap existing functions: preserve their behaviour while saving every session.
+const originalStartQuiz = startQuiz;
+startQuiz = function() {
+  const previousQuiz = quiz;
+  const starting = Date.now();
+  originalStartQuiz();
+  if (quiz !== previousQuiz) {
+    activeMode=el('mode').value;
+    sessionStartedAt=starting;
+    lastFinishReason='';
+    persistSession();
+  }
+};
+const originalFinishMock = finishMock;
+finishMock = function(reason) {
+  const wasFinished=mockFinished;
+  originalFinishMock(reason);
+  if (!wasFinished && mockFinished) {
+    const score=quiz.filter(q=>selected[q.id]===q.answer).length;
+    lastFinishReason=reason || 'Mock test completed.';
+    mockHistory.unshift({finishedAt:Date.now(),score});
+    mockHistory=mockHistory.slice(0,50);
+    safeWrite(HISTORY_KEY,mockHistory);
+    showHistory();
+    persistSession();
+  }
+};
+
 el('startBtn').addEventListener('click', startQuiz);
 el('prevBtn').addEventListener('click', () => { if (current > 0) { current--; render(); } });
 el('nextBtn').addEventListener('click', () => { if (current < quiz.length - 1) { current++; render(); } });
@@ -536,6 +677,8 @@ el('mode').addEventListener('change', () => {
 });
 setupTopics();
 el('mode').dispatchEvent(new Event('change'));
+showHistory();
+if (!restoreSession()) el('resumeStatus').textContent='Choose a mode and press Start to save your progress.';
 </script>
 </body>
 </html>
