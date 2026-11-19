@@ -185,6 +185,12 @@ button.warn { background:var(--amber); color:#1b1200; border-color:transparent; 
   .controls, .stats, .actions, .topic-list { grid-template-columns: 1fr; }
   .card { padding:14px; }
 }
+.option.chosen { border-color: var(--blue); background: rgba(56,189,248,.14); }
+#examTimer { font-size: 16px; font-weight: 800; letter-spacing: .03em; margin-bottom: 12px; }
+#examTimer.urgent { color: var(--red); border-color: var(--red); }
+#examResult { border-color: var(--green); }
+#examResult h2 { margin: 0 0 8px; font-size: 24px; }
+#examResult p { margin: 6px 0; }
 </style>
 </head>
 <body>
@@ -218,13 +224,14 @@ button.warn { background:var(--amber); color:#1b1200; border-color:transparent; 
         <button class="primary" id="startBtn">Start / Restart</button>
       </div>
     </div>
-    <p class="small">Tip: keep “Shuffle answers” switched on so you learn the correct answer, not just the letter.</p>
+    <p class="small">Mock test: 50 questions in the official topic mix, 30-minute timer and answers revealed at the end. Other modes give immediate feedback. Keep answer shuffling on so you learn the answer, not its letter.</p>
     <label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:14px;color:var(--text);">
       <input id="shuffleAnswers" type="checkbox" checked> Shuffle answer order
     </label>
   </div>
 
   <div class="card">
+    <div id="examTimer" class="badge hidden" role="timer" aria-live="off">30:00 remaining</div>
     <div class="stats">
       <div class="stat"><strong id="score">0</strong><span>Correct</span></div>
       <div class="stat"><strong id="wrong">0</strong><span>Wrong</span></div>
@@ -234,6 +241,8 @@ button.warn { background:var(--amber); color:#1b1200; border-color:transparent; 
     <div style="height:10px"></div>
     <div class="progress"><div id="bar"></div></div>
   </div>
+
+  <div class="card hidden" id="examResult" role="status" aria-live="polite"></div>
 
   <div class="card" id="quizCard">
     <div class="q-meta">
@@ -248,6 +257,7 @@ button.warn { background:var(--amber); color:#1b1200; border-color:transparent; 
       <button class="secondary" id="nextBtn">Next</button>
       <button class="warn" id="showBtn">Show answer</button>
     </div>
+    <button class="primary hidden" id="finishBtn" style="margin-top:12px">Finish mock and mark my answers</button>
   </div>
 
   <div class="card">
@@ -292,69 +302,146 @@ function escapeAttr(s) {
   return String(s).replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;').replaceAll('>','&gt;');
 }
 
+
+const MOCK_TOPICS = [
+  ['GENERAL HEALTH AND SAFETY AT WORK', 6],
+  ['MANUAL HANDLING OPERATIONS', 4],
+  ['REPORTING ACCIDENTS', 3],
+  ['PERSONAL PROTECTIVE EQUIPMENT AT WORK', 4],
+  ['HEALTH AND HYGIENE', 3],
+  ['FIRE AND EMERGENCY', 9],
+  ['WORK AT HEIGHT', 5],
+  ['WORK EQUIPMENT', 4],
+  ['SPECIAL SITE HAZARDS', 3],
+  ['ELECTROTECHNICAL', 6],
+  ['ENVIRONMENTAL', 3]
+];
+const MOCK_SECONDS = 30 * 60;
+let mockMode = false;
+let mockFinished = false;
+let mockDeadline = null;
+let mockTimerId = null;
+
+function stopMockTimer() {
+  if (mockTimerId !== null) clearInterval(mockTimerId);
+  mockTimerId = null;
+  mockDeadline = null;
+}
+
+function updateMockClock() {
+  if (!mockMode || mockFinished || mockDeadline === null) return;
+  const remaining = Math.max(0, Math.ceil((mockDeadline - Date.now()) / 1000));
+  const minutes = Math.floor(remaining / 60);
+  const seconds = String(remaining % 60).padStart(2, '0');
+  el('examTimer').textContent = minutes + ':' + seconds + ' remaining';
+  el('examTimer').classList.toggle('urgent', remaining <= 300);
+  if (remaining === 0) finishMock('Time is up.');
+}
+
 function startQuiz() {
+  if (mockMode && !mockFinished && quiz.length && Object.keys(selected).length &&
+      !window.confirm('Restart your current mock? Your answers will be lost.')) return;
+  stopMockTimer();
   const mode = el('mode').value;
+  mockMode = mode === 'mock';
+  mockFinished = false;
   let pool = [...QUESTIONS];
   if (mode === 'topic') pool = pool.filter(q => q.topic === el('topic').value);
   if (mode === 'wrong') pool = pool.filter(q => wrongBank[q.id]);
-  let count = parseInt(el('count').value || '50', 10);
-  if (mode === 'mock') count = 50;
-  if (mode === 'all') count = pool.length;
-  count = Math.max(1, Math.min(count, pool.length));
-  quiz = shuffle(pool).slice(0, count).map(q => {
+
+  if (mockMode) {
+    pool = [];
+    for (const [topic, required] of MOCK_TOPICS) {
+      const options = QUESTIONS.filter(q => q.topic === topic);
+      if (options.length < required) {
+        window.alert('The question bank is missing questions for ' + topic);
+        mockMode = false;
+        return;
+      }
+      pool.push(...shuffle(options).slice(0, required));
+    }
+    pool = shuffle(pool);
+  } else {
+    const asked = Number.parseInt(el('count').value || '50', 10);
+    const count = mode === 'all' ? pool.length : Math.max(1, Number.isFinite(asked) ? asked : 50);
+    pool = shuffle(pool).slice(0, count);
+  }
+
+  quiz = pool.map(q => {
     const entries = Object.entries(q.options).map(([letter, text]) => ({letter, text}));
-    const opts = el('shuffleAnswers').checked ? shuffle(entries) : entries;
-    return {...q, displayOptions: opts};
+    return {...q, displayOptions: el('shuffleAnswers').checked ? shuffle(entries) : entries};
   });
   current = 0;
   selected = {};
   answeredState = {};
+  el('examResult').classList.add('hidden');
+  el('examResult').innerHTML = '';
+  el('examTimer').classList.toggle('hidden', !mockMode);
+  if (mockMode) {
+    mockDeadline = Date.now() + MOCK_SECONDS * 1000;
+    mockTimerId = setInterval(updateMockClock, 1000);
+    updateMockClock();
+  }
   render();
 }
 
 function render() {
+  const fb = el('feedback');
+  const mockInProgress = mockMode && !mockFinished;
+  el('showBtn').classList.toggle('hidden', mockMode);
+  el('finishBtn').classList.toggle('hidden', !mockInProgress || quiz.length === 0);
+  el('prevBtn').disabled = current === 0 || quiz.length === 0;
+  el('nextBtn').disabled = !quiz.length || current >= quiz.length - 1;
+
   if (!quiz.length) {
     el('qNumber').textContent = 'No questions available';
     el('qTopic').textContent = '';
     el('questionText').textContent = el('mode').value === 'wrong'
-      ? 'No wrong answers saved yet. Do a mock test first, then come back here.'
+      ? 'No wrong answers saved yet. Try a practice session or mock test first.'
       : 'Press Start to begin.';
     el('options').innerHTML = '';
-    el('feedback').className = 'feedback';
+    fb.className = 'feedback';
+    fb.innerHTML = '';
     updateStats();
     return;
   }
 
   const q = quiz[current];
-  const ans = q.answer;
-  const isAnswered = answeredState[q.id];
-  el('qNumber').textContent = `Question ${current + 1} of ${quiz.length} · ID ${q.id} · Page ${q.page}`;
-  el('qTopic').innerHTML = `<span class="badge">${q.topic}</span>`;
+  const isAnswered = Boolean(answeredState[q.id]);
+  const revealAnswer = mockFinished || (!mockMode && isAnswered);
+  el('qNumber').textContent = 'Question ' + (current + 1) + ' of ' + quiz.length
+    + ' · ID ' + q.id + ' · Guide page ' + q.page;
+  el('qTopic').innerHTML = '<span class="badge">' + escapeHtml(q.topic) + '</span>';
   el('questionText').textContent = q.question;
-
   el('options').innerHTML = q.displayOptions.map((opt, idx) => {
     let cls = 'option';
-    if (isAnswered) {
+    if (revealAnswer) {
       cls += ' disabled';
-      if (opt.letter === ans) cls += ' correct';
+      if (opt.letter === q.answer) cls += ' correct';
       else if (selected[q.id] === opt.letter) cls += ' wrong';
+    } else if (mockInProgress && selected[q.id] === opt.letter) {
+      cls += ' chosen';
     }
-    return `<button class="${cls}" onclick="chooseAnswer('${q.id}','${opt.letter}')">
-      <strong>${String.fromCharCode(65+idx)}.</strong> ${escapeHtml(opt.text)}
-    </button>`;
+    return '<button class="' + cls + '" ' + (revealAnswer ? 'disabled ' : '')
+      + 'onclick="chooseAnswer(\'' + q.id + '\',\'' + opt.letter + '\')">'
+      + '<strong>' + String.fromCharCode(65 + idx) + '.</strong> '
+      + escapeHtml(opt.text) + '</button>';
   }).join('');
 
-  const fb = el('feedback');
-  if (isAnswered) {
-    const correctText = q.options[ans];
-    const userCorrect = selected[q.id] === ans;
-    fb.className = `feedback show ${userCorrect ? 'good' : 'bad'}`;
+  if (revealAnswer) {
+    const correctText = escapeHtml(q.options[q.answer]);
+    const userCorrect = selected[q.id] === q.answer;
+    fb.className = 'feedback show ' + (userCorrect ? 'good' : 'bad');
     fb.innerHTML = userCorrect
-      ? `<strong>Correct.</strong> The answer is: ${escapeHtml(correctText)}`
-      : `<strong>Not quite.</strong> Correct answer: <strong>${escapeHtml(correctText)}</strong>`;
+      ? '<strong>Correct.</strong> ' + correctText
+      : '<strong>' + (selected[q.id] ? 'Not quite.' : 'Not answered.')
+        + '</strong> Correct answer: <strong>' + correctText + '</strong>';
+  } else if (mockInProgress && isAnswered) {
+    fb.className = 'feedback show';
+    fb.textContent = 'Answer saved. You can change it before submitting. Answers are revealed at the end.';
   } else {
     fb.className = 'feedback';
-    fb.innerHTML = '';
+    fb.textContent = '';
   }
   updateStats();
 }
@@ -364,45 +451,83 @@ function escapeHtml(s) {
 }
 
 function chooseAnswer(id, letter) {
-  if (answeredState[id]) return;
-  const q = quiz[current];
+  if (!quiz.length || mockFinished) return;
+  if (!mockMode && answeredState[id]) return;
+  if (quiz[current].id !== id) return;
   selected[id] = letter;
   answeredState[id] = true;
-  if (letter === q.answer) {
-    delete wrongBank[id];
-  } else {
-    wrongBank[id] = true;
+  if (!mockMode) {
+    if (letter === quiz[current].answer) delete wrongBank[id];
+    else wrongBank[id] = true;
+    localStorage.setItem('ecsWrongBank', JSON.stringify(wrongBank));
   }
-  localStorage.setItem('ecsWrongBank', JSON.stringify(wrongBank));
   render();
 }
 
 function showAnswer() {
-  if (!quiz.length) return;
+  if (!quiz.length || mockMode) return;
   const q = quiz[current];
   if (!answeredState[q.id]) {
     selected[q.id] = null;
     answeredState[q.id] = true;
+    wrongBank[q.id] = true;
+    localStorage.setItem('ecsWrongBank', JSON.stringify(wrongBank));
   }
   render();
 }
 
+function finishMock(reason = 'Mock test completed.') {
+  if (!mockMode || mockFinished || !quiz.length) return;
+  mockFinished = true;
+  stopMockTimer();
+  const correct = quiz.filter(q => selected[q.id] === q.answer).length;
+  const attempted = quiz.filter(q => Boolean(selected[q.id])).length;
+  const unanswered = quiz.length - attempted;
+  for (const q of quiz) {
+    if (selected[q.id] === q.answer) delete wrongBank[q.id];
+    else wrongBank[q.id] = true;
+  }
+  localStorage.setItem('ecsWrongBank', JSON.stringify(wrongBank));
+  const passed = correct >= 43;
+  const result = el('examResult');
+  result.classList.remove('hidden');
+  result.innerHTML = '<h2>' + (passed ? 'PASS — well done!' : 'Not a pass yet — keep practising')
+    + '</h2><p><strong>' + correct + '/50 correct (' + Math.round(correct * 2)
+    + '%)</strong> — 43/50 needed to pass.</p>'
+    + '<p>' + (50 - correct - unanswered) + ' incorrect · ' + unanswered + ' unanswered.</p>'
+    + '<p>' + escapeHtml(reason) + ' Review each question using Back and Next, or use '
+    + '“Wrong answers only” to focus on the ones you missed.</p>'
+    + '<p class="small">This is a practice mock based on the uploaded 2024 ECS revision guide, not an official exam result.</p>';
+  el('examTimer').textContent = reason === 'Time is up.' ? 'Time up' : 'Mock completed';
+  el('examTimer').classList.remove('urgent');
+  render();
+  if (typeof result.scrollIntoView === 'function') result.scrollIntoView({behavior:'smooth',block:'start'});
+}
+
 function updateStats() {
-  const answeredIds = Object.keys(answeredState).filter(id => answeredState[id]);
+  const answeredIds = quiz.filter(q => answeredState[q.id]);
   const correct = quiz.filter(q => answeredState[q.id] && selected[q.id] === q.answer).length;
   const wrong = answeredIds.length - correct;
-  const pct = answeredIds.length ? Math.round((correct / answeredIds.length) * 100) : 0;
-  el('score').textContent = correct;
-  el('wrong').textContent = wrong;
-  el('answered').textContent = `${answeredIds.length}/${quiz.length || 0}`;
-  el('percent').textContent = `${pct}%`;
-  el('bar').style.width = quiz.length ? `${(answeredIds.length / quiz.length) * 100}%` : '0%';
+  const pct = mockMode
+    ? (quiz.length ? Math.round(correct / quiz.length * 100) : 0)
+    : (answeredIds.length ? Math.round(correct / answeredIds.length * 100) : 0);
+  const hideResults = mockMode && !mockFinished;
+  el('score').textContent = hideResults ? '—' : correct;
+  el('wrong').textContent = hideResults ? '—' : wrong;
+  el('answered').textContent = answeredIds.length + '/' + quiz.length;
+  el('percent').textContent = hideResults ? '—' : pct + '%';
+  el('bar').style.width = quiz.length ? (answeredIds.length / quiz.length * 100) + '%' : '0%';
 }
 
 el('startBtn').addEventListener('click', startQuiz);
 el('prevBtn').addEventListener('click', () => { if (current > 0) { current--; render(); } });
 el('nextBtn').addEventListener('click', () => { if (current < quiz.length - 1) { current++; render(); } });
 el('showBtn').addEventListener('click', showAnswer);
+el('finishBtn').addEventListener('click', () => {
+  const unanswered = quiz.filter(q => !selected[q.id]).length;
+  if (unanswered && !window.confirm('You have ' + unanswered + ' unanswered question(s). Finish and mark the mock now?')) return;
+  finishMock('Mock test completed.');
+});
 el('mode').addEventListener('change', () => {
   const mode = el('mode').value;
   el('topic').disabled = mode !== 'topic';
